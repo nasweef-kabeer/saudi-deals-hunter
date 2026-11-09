@@ -8,8 +8,8 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
 STATE = Path("seen.json")
 
 QUERIES = [
