@@ -1,142 +1,103 @@
-
+import hashlib
 import json
 import os
-import re
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
-import xml.etree.ElementTree as ET
+from datetime import datetime, timezone
 from pathlib import Path
 
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"].strip()
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"].strip()
-STATE = Path("seen.json")
-
-QUERIES = [
-    'Saudi Arabia ("free gift" OR "free sample" OR "gift card giveaway") (Amazon OR noon OR SHEIN OR Temu)',
-    'Saudi Arabia ("flash sale" OR "limited time offer") (noon OR Amazon OR Trendyol)',
-    'السعودية ("هدية مجانية" OR "بطاقة هدية" OR "عروض فلاش")',
-]
-
-GOOD = re.compile(
-    r"free gift|free sample|gift card|giveaway|flash sale|limited.time|هدية مجانية|بطاقة هدية|عروض فلاش",
-    re.I,
-)
-BAD = re.compile(
-    r"generator|hack|crack|unlimited free|survey reward|gift card code generator",
-    re.I,
-)
+STATE = Path('seen.json')
+OFFERS = Path('offers.json')
 
 
 def send(message):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    body = urllib.parse.urlencode({
-        "chat_id": CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": "true",
-    }).encode()
+    token = os.environ['TELEGRAM_BOT_TOKEN'].strip()
+    chat_id = os.environ['TELEGRAM_CHAT_ID'].strip()
+    if not token or not chat_id:
+        raise ValueError('Telegram secrets must not be empty')
+    url = f'https://api.telegram.org/bot{token}/sendMessage'
+    payload = urllib.parse.urlencode({'chat_id': chat_id, 'text': message, 'disable_web_page_preview': 'true'}).encode()
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url, data=payload, method='POST'), timeout=25) as response:
+            result = json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f'Telegram HTTP {error.code}. Check bot token, chat ID and bot permissions.') from None
+    if not result.get('ok'):
+        raise RuntimeError('Telegram rejected message')
 
-    req = urllib.request.Request(url, data=body, method="POST")
 
-    with urllib.request.urlopen(req, timeout=25) as response:
-        result = json.load(response)
-
-    if not result.get("ok"):
-        raise RuntimeError("Telegram rejected message")
-
-
-def fetch(query):
-    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({
-        "q": query,
-        "hl": "en",
-        "gl": "SA",
-        "ceid": "SA:en",
-    })
-
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "SaudiDealsHunter/1.0"},
-    )
-
-    with urllib.request.urlopen(req, timeout=25) as response:
-        root = ET.fromstring(response.read())
-
-    for item in root.findall("./channel/item"):
-        title = (item.findtext("title") or "").strip()
-        link = (item.findtext("link") or "").strip()
-
-        if title and link and GOOD.search(title) and not BAD.search(title):
-            yield title, link
+def verified(offer):
+    required = ('title', 'merchant', 'official_url', 'saudi_eligible', 'price_sar', 'shipping_sar', 'expires_at', 'requirements', 'verified_at', 'source_type')
+    if not isinstance(offer, dict) or any(k not in offer for k in required):
+        return False, 'missing required information'
+    try:
+        parsed = urllib.parse.urlparse(offer['official_url'])
+        if parsed.scheme != 'https' or not parsed.hostname:
+            return False, 'invalid official link'
+        domains = ('amazon.sa', 'noon.com', 'temu.com', 'aliexpress.com', 'shein.com', 'trendyol.com')
+        host = parsed.hostname.lower()
+        if not any(host == domain or host.endswith('.' + domain) for domain in domains):
+            return False, 'merchant domain not allowlisted'
+        if offer['saudi_eligible'] is not True or offer['source_type'] != 'official_merchant':
+            return False, 'not independently confirmed as Saudi-eligible official merchant offer'
+        price, shipping = float(offer['price_sar']), float(offer['shipping_sar'])
+        if price < 0 or shipping < 0:
+            return False, 'negative price or shipping'
+        expiry = datetime.fromisoformat(offer['expires_at'].replace('Z', '+00:00'))
+        checked = datetime.fromisoformat(offer['verified_at'].replace('Z', '+00:00'))
+        now = datetime.now(timezone.utc)
+        if expiry.tzinfo is None or checked.tzinfo is None or expiry <= now or checked > now or (now - checked).total_seconds() > 86400:
+            return False, 'expired, stale or invalid verification timestamp'
+        if not str(offer['title']).strip() or not str(offer['requirements']).strip():
+            return False, 'missing description or requirements'
+        if not offer.get('independently_checked', False):
+            return False, 'merchant checkout and terms not independently checked'
+        if not offer.get('qualifies', False):
+            return False, 'not marked worthwhile after comparison'
+        return True, ''
+    except (ValueError, TypeError, KeyError, OverflowError):
+        return False, 'invalid price, date or field type'
 
 
 def main():
-    test_mode = (
-        "--test" in sys.argv
-        or os.getenv("TEST_MESSAGE", "").lower() == "true"
-    )
-
-    if test_mode:
-        send(
-            "✅ Saudi Deals Hunter test successful!\n\n"
-            "Your GitHub Actions bot can send Telegram messages.\n"
-            "This is a test, not a shopping offer."
-        )
-        print("Telegram test sent successfully.")
+    if '--test' in sys.argv or os.getenv('TEST_MESSAGE', '').lower() == 'true':
+        send('✅ Saudi Deals Hunter Telegram test successful. This is not a shopping offer.')
+        print('Telegram test sent.')
         return
-
-    first_run = not STATE.exists()
-
-    seen = set()
-    if not first_run:
-        seen = set(json.loads(STATE.read_text()))
-
-    found = []
-    errors = []
-
-    for query in QUERIES:
-        try:
-            found.extend(fetch(query))
-        except Exception as exc:
-            errors.append(f"{type(exc).__name__}: {exc}")
-
-    if errors:
-        print("Feed errors:", *errors, sep="\n")
-
-    if not found and errors:
-        raise RuntimeError("No feeds could be checked successfully")
-
-    new = []
-    for title, link in found:
-        key = title.casefold()
-        if key not in seen:
-            new.append((title, link, key))
-            seen.add(key)
-
-    if first_run:
-        STATE.write_text(
-            json.dumps(sorted(seen), ensure_ascii=False, indent=2)
-            + "\n"
-        )
-        print(
-            f"Initialized baseline with {len(seen)} headlines. "
-            "No alerts on first run."
-        )
+    if not OFFERS.exists():
+        print('No offers.json supplied. No verified offers to alert. GitHub job succeeded; discovery is not configured.')
         return
+    offers = json.loads(OFFERS.read_text(encoding='utf-8'))
+    if not isinstance(offers, list):
+        raise ValueError('offers.json must contain a JSON array')
+    seen = set(json.loads(STATE.read_text(encoding='utf-8'))) if STATE.exists() else set()
+    approved = 0
+    rejected = 0
+    for offer in offers:
+        ok, reason = verified(offer)
+        if not ok:
+            rejected += 1
+            print('Rejected offer:', reason)
+            continue
+        identity = f"{offer['official_url']}|{offer['price_sar']}|{offer['expires_at']}"
+        key = hashlib.sha256(identity.encode()).hexdigest()
+        if key in seen:
+            continue
+        total = float(offer['price_sar']) + float(offer['shipping_sar'])
+        message = (f"🎁 VERIFIED SAUDI DEAL\n{offer['title']}\nMerchant: {offer['merchant']}\n"
+                   f"Price: SAR {float(offer['price_sar']):.2f} + shipping SAR {float(offer['shipping_sar']):.2f}"
+                   f" = SAR {total:.2f}\nRequirements: {offer['requirements']}\n"
+                   f"Expires: {offer['expires_at']}\nOfficial link: {offer['official_url']}")
+        send(message)
+        seen.add(key)
+        STATE.write_text(json.dumps(sorted(seen), indent=2) + '\n', encoding='utf-8')
+        approved += 1
+        if approved >= 5:
+            break
+    print(f'Sent {approved} verified alerts; rejected {rejected} incomplete/unverified entries.')
 
-    # News headlines are not independently verified offers.
-    # Keep them for review instead of automatically sending
-    # unverified promotions as deal alerts.
-    STATE.write_text(
-        json.dumps(sorted(seen)[-1500:], ensure_ascii=False, indent=2)
-        + "\n"
-    )
 
-    print(
-        f"Checked {len(found)} matching headlines; "
-        f"found {len(new)} new leads. "
-        "No unverified deal alerts sent."
-    )
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
