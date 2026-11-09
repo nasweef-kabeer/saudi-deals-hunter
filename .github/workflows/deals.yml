@@ -1,4 +1,5 @@
 name: Saudi Deals Hunter
+
 on:
   workflow_dispatch:
     inputs:
@@ -9,35 +10,53 @@ on:
         default: false
   schedule:
     - cron: '17 * * * *'
+
 permissions:
-  contents: read
+  contents: write
+
 concurrency:
   group: saudi-deals-hunter
   cancel-in-progress: false
+
 jobs:
   search:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Restore history
-        uses: actions/cache/restore@v4
-        with:
-          path: seen.json
-          key: deals-history-${{ github.run_id }}
-          restore-keys: |
-            deals-history-
-      - name: Run verified alert checker
+
+      - name: Run deal checker
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TEST_MESSAGE: ${{ inputs.test_message }}
         run: python deals.py
-      - name: Save history
-        if: success() && hashFiles('seen.json') != ''
-        uses: actions/cache/save@v4
-        with:
-          path: seen.json
-          key: deals-history-${{ github.run_id }}
+
+      - name: Save deal history
+        if: success()
+        run: |
+          if [ ! -f seen.json ]; then
+            echo "No deal history to save."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add seen.json
+
+          if git diff --cached --quiet; then
+            echo "No new history."
+            exit 0
+          fi
+
+          git commit -m "Update Saudi Deals Hunter history"
+          git push origin HEAD:main
