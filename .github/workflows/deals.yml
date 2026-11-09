@@ -1,51 +1,42 @@
-
 name: Saudi Deals Hunter
-
 on:
   workflow_dispatch:
     inputs:
       test_message:
-        description: "Send Telegram test message"
-        required: false
+        description: Send Telegram test message
         type: boolean
-        default: true
-
+        required: false
+        default: false
   schedule:
-    - cron: "17 * * * *"
-
+    - cron: '17 * * * *'
 permissions:
   contents: read
-
+concurrency:
+  group: saudi-deals-hunter
+  cancel-in-progress: false
 jobs:
   search:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
-
-      - name: Restore deal history
+          python-version: '3.12'
+      - name: Restore history
         uses: actions/cache/restore@v4
         with:
           path: seen.json
           key: deals-history-${{ github.run_id }}
           restore-keys: |
             deals-history-
-
-      - name: Run deal checker
+      - name: Run verified alert checker
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TEST_MESSAGE: ${{ inputs.test_message }}
         run: python deals.py
-
-      - name: Save deal history
-        if: success()
+      - name: Save history
+        if: success() && hashFiles('seen.json') != ''
         uses: actions/cache/save@v4
         with:
           path: seen.json
