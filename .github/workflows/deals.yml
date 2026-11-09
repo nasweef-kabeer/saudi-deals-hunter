@@ -9,6 +9,7 @@ on:
         required: false
         type: boolean
         default: true
+
   schedule:
     - cron: "17 * * * *"
 
@@ -28,9 +29,24 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Restore deal history
+        uses: actions/cache/restore@v4
+        with:
+          path: seen.json
+          key: deals-history-${{ github.run_id }}
+          restore-keys: |
+            deals-history-
+
       - name: Run deal checker
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TEST_MESSAGE: ${{ inputs.test_message }}
         run: python deals.py
+
+      - name: Save deal history
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: seen.json
+          key: deals-history-${{ github.run_id }}
