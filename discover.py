@@ -59,8 +59,14 @@ def main():
                 "utf-8", errors="replace"
             )
     except Exception as exc:
-        print(f"Noon fetch failed: {exc}")
-        raise
+        print(f"Noon source unavailable: {exc}")
+        print("Skipping Noon. No verified offers found.")
+
+        OUTPUT.write_text(
+            "[]\n",
+            encoding="utf-8"
+        )
+        return
 
     parser = ProductLinks()
     parser.feed(html)
